@@ -84,31 +84,46 @@ def state_gathering() -> Gathering:
 
 
 @pytest.fixture
+def lobby_settings() -> LobbySettings:
+    return LobbySettings(turn_duration=None, winning_score=1, finish_delay=0)
+
+
+@pytest.fixture
 def lobby(
     egor: Player,
     setup_deck: Deck[SetupCard],
     punchline_deck: Deck[PunchlineCard],
     observer: Mock,
     state_gathering: Gathering,
+    lobby_settings: LobbySettings,
 ) -> Lobby:
-    return Lobby(
-        settings=LobbySettings(winning_score=1),
+    lobby = Lobby(
+        settings=lobby_settings,
         players=[],
-        lead=egor,
-        owner=egor,
         state=state_gathering,
         # TODO: state gathering determines the setups and punchlines
         # Move?
         setups=setup_deck,
         punchlines=punchline_deck,
     )
+    # TODO: Почему лобби создается без owner?
+    lobby.owner = egor
+    return lobby
 
 
 @pytest.fixture
-def egor_connected(egor: Player, observer: Mock) -> None:
+def egor_joined(lobby: Lobby, egor: Player) -> None:
+    lobby.add_player(egor)
+
+
+@pytest.fixture
+def egor_connected(
+    egor_joined: None, lobby: Lobby, egor: Player, observer: Mock
+) -> None:
     player_mock = Mock(LobbyObserver)
     observer.attach_mock(player_mock, "egor")
     egor.observer = player_mock
+    lobby.set_connected(egor)
 
 
 @pytest.fixture
@@ -139,3 +154,19 @@ def yura_connected(
     observer.attach_mock(player_mock, "yura")
     yura.observer = player_mock
     lobby.set_connected(yura)
+
+
+@pytest.fixture
+async def game_started(
+    lobby: Lobby,
+    egor: Player,
+    setup_deck: Deck[SetupCard],
+    punchline_deck: Deck[PunchlineCard],
+    lobby_settings: LobbySettings,
+) -> None:
+    lobby.state.start_game(
+        egor,
+        lobby_settings,
+        setup_deck,
+        punchline_deck,
+    )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import traceback
+from asyncio import Task
 from enum import StrEnum
 from typing import Generic, TypeVar
 from uuid import uuid4
@@ -14,6 +15,7 @@ from starlette.websockets import WebSocketDisconnect
 from typing_extensions import Annotated
 
 from config import config
+from dao import CardsDAO
 from dependencies import CardsDAODependency, lifespan
 from lobby import (
     CardOnTable,
@@ -27,9 +29,9 @@ from lobby import (
     PunchlineCard,
     SetupCard,
     Turns,
+    GameAlreadyStartedError,
 )
 
-lobby: Lobby = None
 observers: list[LobbyObserver] = []
 
 app = FastAPI(lifespan=lifespan)
@@ -44,6 +46,8 @@ app.add_middleware(
 )
 
 players: dict[str, Player] = {}
+lobbies: dict[str, Lobby] = {}
+remove_player_tasks: dict[str, Task] = {}
 
 
 class ApiModel(BaseModel):
@@ -58,7 +62,6 @@ def get_player_data_from_player(player: Player) -> PlayerData:
         background_color=player.profile.background_color,
         state=PlayerState.PENDING,
         score=player.score,
-        is_lobby_owner=lobby.owner is player,
         is_connected=player.is_connected,
     )
 
@@ -92,7 +95,7 @@ class SetupData(ApiModel):
 
 
 class PunchlineData(ApiModel):
-    id: str
+    id: int
     text: list[tuple[str, list[str]]]
 
     @classmethod
@@ -182,10 +185,9 @@ class RemotePlayer(LobbyObserver):
                 type="turnStarted",
                 data=TurnStartedData(
                     setup=SetupData.from_setup(setup),
-                    timeout=turn_duration,
+                    turn_duration=turn_duration,
                     lead_uuid=lead.uuid,
                     turn_count=turn_count,
-                    is_leading=self.player is lead,
                     card=PunchlineData.from_card(card) if card else None,
                 ),
             )
@@ -284,7 +286,6 @@ class PlayerData(ApiModel):
     background_color: str
     state: PlayerState
     score: int
-    is_lobby_owner: bool
     is_connected: bool
 
 
@@ -316,9 +317,8 @@ class PickTurnWinnerData(ApiModel):
 
 class TurnStartedData(ApiModel):
     setup: SetupData
-    timeout: int | None
+    turn_duration: int | None
     lead_uuid: str
-    is_leading: bool
     turn_count: int
     card: PunchlineData | None = None
 
@@ -331,7 +331,8 @@ class LobbyState(ApiModel):
     setup: SetupData | None
     timeout: int | None
     lead_uuid: str | None
-    is_leading: bool
+    owner_uuid: str | None
+    self_uuid: str | None
     turn_count: int | None
     selected_card: PunchlineData | None = None
 
@@ -349,13 +350,26 @@ async def connect(
     connect_request: ConnectRequest,
     cards_dao: CardsDAODependency,
 ) -> ConnectResponse:
-    global lobby
-
-    if not lobby_token and lobby:
-        raise HTTPException(status_code=403)
-
-    if not lobby and lobby_token:
-        raise HTTPException(status_code=404)
+    if lobby_token:
+        try:
+            lobby = lobbies[lobby_token]
+        except KeyError:
+            raise HTTPException(status_code=404)
+    else:
+        setups = await cards_dao.get_setups(deck_id="one")
+        punchlines = await cards_dao.get_punchlines(deck_id="one")
+        lobby = Lobby(
+            LobbySettings(
+                winning_score=config.winning_score,
+            ),
+            players=[],
+            setups=setups,
+            punchlines=punchlines,
+            state=Gathering(),
+        )
+        lobby_token = uuid4().hex[:8]
+        lobbies[lobby_token] = lobby
+        print(f"Lobby created. lobbies={lobbies}")
 
     player = Player(
         profile=Profile(
@@ -364,29 +378,18 @@ async def connect(
             background_color=connect_request.background_color,
         ),
     )
-    player_token = uuid4().hex
-    players[player_token] = player
-    if lobby_token:
+    try:
         lobby.add_player(player)
-    else:
-        setups = await cards_dao.get_setups(deck_id="one")
-        punchlines = await cards_dao.get_punchlines(deck_id="one")
+    except GameAlreadyStartedError:
+        raise HTTPException(status_code=403)
 
-        lobby = Lobby(
-            LobbySettings(
-                winning_score=config.winning_score,
-            ),
-            players=[],
-            lead=player,
-            owner=player,
-            setups=setups,
-            punchlines=punchlines,
-            state=Gathering(),
-        )
+    player_token = uuid4().hex[:8]
+    players[player_token] = player
+
     return ConnectResponse(
-        host="ws://192.168.0.18:9999/connect",
+        host=config.ws_url,
         player_token=player_token,
-        lobby_token="boba",
+        lobby_token=lobby_token,
     )
 
 
@@ -395,14 +398,37 @@ async def websocket_endpoint(
     websocket: WebSocket,
     player_token: Annotated[str, Query(alias="playerToken")],
     lobby_token: Annotated[str, Query(alias="lobbyToken")],
+    cards_dao: CardsDAODependency,
 ):
     await websocket.accept()
+    try:
+        lobby = lobbies[lobby_token]
+    except KeyError:
+        await websocket.send_json(
+            {"type": "error", "data": {"status": 404, "message": "Lobby not found"}}
+        )
+        await websocket.close()
+        return
 
     try:
         player = players[player_token]
     except KeyError:
-        raise HTTPException(status_code=404)
-    # TODO пренадлежность к лобби
+        await websocket.send_json(
+            {"type": "error", "data": {"status": 404, "message": "Player not found"}}
+        )
+        await websocket.close()
+        return
+
+    if player not in lobby.all_players:
+        await websocket.send_json(
+            {"type": "error", "data": {"status": 404, "message": "Player not found"}}
+        )
+        await websocket.close()
+        return
+
+    if player_token in remove_player_tasks:
+        remove_player_tasks[player_token].cancel()
+        del remove_player_tasks[player_token]
 
     observer = RemotePlayer(websocket=websocket, lobby=lobby, player=player)
     send_messages_task = asyncio.create_task(observer.send_messages())
@@ -418,16 +444,17 @@ async def websocket_endpoint(
                 state=GameState(type(lobby.state).__name__.lower()),
                 turn_count=lobby.turn_count,
                 players=[
-                    get_player_data_from_player(player)
-                    for player in (*lobby.players, lobby.lead)
+                    get_player_data_from_player(player) for player in lobby.all_players
                 ],
                 table=[
                     CardOnTableData(
-                        card=card_on_table.card if card_on_table.is_open else None,
-                        is_picked=is_card_picked(card_on_table),
+                        card=PunchlineData.from_card(card_on_table.card)
+                        if card_on_table.is_open
+                        else None,
+                        is_picked=is_card_picked(lobby, card_on_table),
                         author=(
                             card_on_table.player.profile.name
-                            if is_card_picked(card_on_table)
+                            if is_card_picked(lobby, card_on_table)
                             else None
                         ),
                     )
@@ -441,7 +468,8 @@ async def websocket_endpoint(
                 ),
                 timeout=lobby.settings.turn_duration,
                 lead_uuid=lobby.lead.uuid,
-                is_leading=player is lobby.lead,
+                owner_uuid=lobby.owner.uuid,
+                self_uuid=player.uuid,
                 selected_card=(
                     PunchlineData.from_card(selected_card) if selected_card else None
                 ),
@@ -449,20 +477,31 @@ async def websocket_endpoint(
         ).model_dump(by_alias=True)
     )
 
+    async def run_remove_player():
+        print(f"Player removal scheduled, player_token={player_token}")
+        await asyncio.sleep(config.player_removal_delay)
+        lobby.remove_player(player)
+        del players[player_token]
+        if not lobby.all_players:
+            del lobbies[lobby_token]
+            print(f"Lobby deleted. lobbies={lobbies}")
+
     while True:
         try:
             json_data = await websocket.receive_json()
             print(f"Received event: {json_data}")
-            await handle_event(json_data, player)
+            await handle_event(lobby, json_data, player, cards_dao=cards_dao)
         except WebSocketDisconnect:
             send_messages_task.cancel()
             lobby.set_disconnected(player)
+            print("before remove")
+            remove_player_tasks[player_token] = asyncio.create_task(run_remove_player())
             break
         except Exception:
             print(f"Unexpected error: {traceback.format_exc()}")
 
 
-def is_card_picked(card_on_table):
+def is_card_picked(lobby: Lobby, card_on_table):
     return (
         card_on_table.player is lobby.state.winner
         if isinstance(lobby.state, Judgement)
@@ -470,7 +509,9 @@ def is_card_picked(card_on_table):
     )
 
 
-async def handle_event(json_data, player) -> None:
+async def handle_event(
+    lobby: Lobby, json_data: dict, player, cards_dao: CardsDAO
+) -> None:
     match json_data["type"]:
         case "startGame":
             event = Event[StartGameData].model_validate(json_data)
@@ -480,6 +521,8 @@ async def handle_event(json_data, player) -> None:
                     turn_duration=event.data.turn_duration,
                     winning_score=event.data.winning_score or config.winning_score,
                 ),
+                setups=await cards_dao.get_setups(deck_id="one"),
+                punchlines=await cards_dao.get_punchlines(deck_id="one"),
             )
         case "makeTurn":
             event = Event[MakeTurnData].model_validate(json_data)
@@ -488,7 +531,7 @@ async def handle_event(json_data, player) -> None:
             except KeyError:
                 print("unknown card")
                 return
-            lobby.state.choose_punchline_card(player, card)
+            lobby.state.make_turn(player, card)
         case "openTableCard":
             event = Event[OpenTableCardData].model_validate(json_data)
             lobby.state.open_punchline_card(player, lobby.table[event.data.index])
@@ -498,7 +541,7 @@ async def handle_event(json_data, player) -> None:
                 card = lobby.punchlines.get_card_by_uuid(int(event.data.id))
             except KeyError:
                 return
-            lobby.state.pick_turn_winner(card)
+            lobby.state.pick_turn_winner(player, card)
         case "continueGame":
             lobby.state.continue_game(player)
 

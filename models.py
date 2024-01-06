@@ -15,7 +15,7 @@ class Punchline(Base):
     __tablename__ = "punchlines"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    text: Mapped[list[tuple[str, list[str]]]] = mapped_column(JSONB, nullable=False)
+    variants: Mapped[list[tuple[str, list[str]]]] = mapped_column(JSONB, nullable=False)
 
 
 class Setup(Base):

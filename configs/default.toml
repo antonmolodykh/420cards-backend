@@ -1,2 +1,3 @@
 [default]
 winning_score = 10
+player_removal_delay = 60

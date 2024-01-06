@@ -3,23 +3,22 @@ import asyncio
 from lobby import (
     CardOnTable,
     Deck,
+    Finished,
     Judgement,
     Lobby,
-    LobbySettings,
     Player,
     PunchlineCard,
     SetupCard,
     Turns,
-    Finished,
 )
 
 
-def test_transit_gathering_to_turns(lobby: Lobby) -> None:
+async def test_transit_gathering_to_turns(lobby: Lobby) -> None:
     lobby.state.start_turn()
     isinstance(lobby.state, Turns)
 
 
-def test_transit_turns_to_judgement(
+async def test_transit_turns_to_judgement(
     lobby: Lobby,
     anton: Player,
     punchline_deck: Deck[PunchlineCard],
@@ -29,13 +28,14 @@ def test_transit_turns_to_judgement(
     lobby.add_player(anton)
     punchline_card = punchline_deck.get_card()
     anton.add_punchline_card(punchline_card)
-    lobby.transit_to(Turns(setup_card))
-    lobby.state.choose_punchline_card(anton, punchline_card)
+    lobby.transit_to(Turns(setup_card, 1))
+    lobby.state.make_turn(anton, punchline_card)
+    await asyncio.sleep(0.01)
     assert isinstance(lobby.state, Judgement)
     assert lobby.state.setup is setup_card
 
 
-def test_transit_judgement_to_turns(
+async def test_transit_judgement_to_turns(
     lobby: Lobby,
     anton: Player,
     punchline_deck: Deck[PunchlineCard],
@@ -58,13 +58,15 @@ async def test_transit_judgement_to_finished(
     setup_deck: Deck[SetupCard],
 ) -> None:
     setup_card = setup_deck.get_card()
+    lobby.add_player(egor)
     lobby.add_player(anton)
     lobby.settings.winning_score = 1
     lobby.settings.finish_delay = 0
     lobby.transit_to(Judgement(setup_card))
     punchline_card = punchline_deck.get_card()
     lobby.table.append(CardOnTable(punchline_card, anton))
-    lobby.state.pick_turn_winner(punchline_card)
+    lobby.state.open_punchline_card(egor, lobby.get_card_from_table(punchline_card))
+    lobby.state.pick_turn_winner(egor, punchline_card)
     await asyncio.sleep(0.01)
     assert isinstance(lobby.state, Finished)
 

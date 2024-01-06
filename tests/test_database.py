@@ -34,7 +34,7 @@ def cards_dao(async_session: async_sessionmaker) -> CardsDAO:
 
 @pytest.fixture
 async def punchline_card(session: AsyncSession) -> None:
-    await session.execute(insert(Punchline).values(text=[("value", ["variant"])]))
+    await session.execute(insert(Punchline).values(variants=[("value", ["variant"])]))
     await session.commit()
 
 

@@ -33,7 +33,7 @@ class CardsDAO:
                 cards=[
                     PunchlineCard(
                         id=punchline_card.id,
-                        text=punchline_card.text,
+                        text=punchline_card.variants,
                     )
                     for (punchline_card,) in result.all()
                 ]

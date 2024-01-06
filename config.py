@@ -12,7 +12,6 @@ config = dynaconf.Dynaconf(
         root_path / "default.toml",
         root_path / "local.toml",
         root_path / "test.toml",
-        root_path / "prod.toml",
     ],
     load_dotenv=True,
     merge_enabled=True,

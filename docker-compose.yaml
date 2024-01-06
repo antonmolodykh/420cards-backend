@@ -1,11 +1,18 @@
 version: '3.8'
 
 services:
-  db:
-    image: postgres:15.3-alpine
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: 420cards
+  backend:
+    build: .
     ports:
-      - '5432:5432'
+      - "8888:8888"
+    network_mode: "host"
+
+#services:
+#  db:
+#    image: postgres:15.3-alpine
+#    environment:
+#      POSTGRES_USER: postgres
+#      POSTGRES_PASSWORD: postgres
+#      POSTGRES_DB: 420cards
+#    ports:
+#      - '5432:5432'
